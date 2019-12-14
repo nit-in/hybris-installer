@@ -20,151 +20,136 @@ set_progress() { echo -e "set_progress $1\n" > $OUTFD; }
 # Print some text ($1) on the screen
 ui_print() { [ -z "$1" ] && echo -e "ui_print  \nui_print" > $OUTFD || echo -e "ui_print $@\nui_print" > $OUTFD; }
 
-# Log some text ($1) for script debugging
-log() { echo "hybris-installer: $@"; }
-
 # Remove package residue files from /tmp and unmount partitions
-cleanup() { log "Cleaning up..."; umount /system; rm -rf $FILES/; }
+cleanup() { log "Cleaning up..."; rm -rf $FILES/; }
 
 # Before quitting with an exit code ($1), show a message ($2)
 abort() { ui_print "E$1: $2"; cleanup; exit $1; }
 
-# <<< TWRP init <<<
+other_method(){
+    ui_print "toybox Tar failed"
+    ui_print "using other method"
+    flash_hybris_other_method
+}
 
-# >>> Custom functions >>>
-
-# Verify device boardname validity (e.g. not unset, no spaces / uppercase chars)
-invalid_device() { [[ -z "$CURRENT_DEVICE" || "$CURRENT_DEVICE" = *" "* || `echo "$CURRENT_DEVICE" | grep -q [A-Z]` ]]; }
-
-# <<< Custom functions <<<
 
 # Constants & variables
 VERSION="%VERSION%" # e.g. "3.2.0.12 (Torronsuo)"
 TARGET_LOS_VER="%LOS_VER%" # e.g. "16.0"
-TARGET_DEVICE="%DEVICE%" # e.g. "cheeseburger"
-CURRENT_DEVICE=`getprop ro.omni.device`
+DEVICE="%DEVICE%" # e.g. "cheeseburger"# e.g. "cheeseburger"
+CURRENT_DEVICE="getprop ro.product.device"
 ROOT="/data/.stowaways/sailfishos"
-FORCE_REINSTALL=0
-
-# >>> Sanity checks >>>
-
-# Device
-invalid_device && CURRENT_DEVICE=`getprop ro.product.device`
-invalid_device && CURRENT_DEVICE=`getprop ro.build.product`
-[ "$CURRENT_DEVICE" != "$TARGET_DEVICE" ] && abort 7 "This package is for '$TARGET_DEVICE' devices; this is a '$CURRENT_DEVICE'."
-
-# ext4 check for /data (& /cache)
-(mount | grep -q /cache || mount /cache) &&
-	(mount | grep -q "/cache.*ext4" || abort 1 "Cache is NOT formatted as ext4; check out 'Wipe > Advanced' from TWRP!") ||
-	log "Couldn't mount /cache! Is this an A/B device by any chance?"
-(mount | grep -q /data || mount /data) || abort 2 "Couldn't mount /data; running e2fsck and rebooting may help."
-mount | grep -q "/data.*ext4" || abort 3 "Data is NOT formatted as ext4; check out 'Wipe > Advanced' from TWRP!"
-
-# Treble
-[ -r /dev/block/bootdevice/by-name/vendor ] || abort 4 "A vendor partition doesn't exist; you need to do an OTA from OxygenOS 5.1.5 to 5.1.6!"
-
-# Android
-(mount | grep -q /system || mount /system) || abort 5 "Couldn't mount /system!"
-if [ `cat /system/build.prop | grep lineage.build.version= | cut -d'=' -f2` != "$TARGET_LOS_VER" ]; then
-	if [ ! -f /tmp/sfos_flash_confirm ]; then
-		touch /tmp/sfos_flash_confirm
-		abort 6 "If you don't know what you're doing: please factory reset & dirty flash LineageOS $TARGET_LOS_VER before this zip. Otherwise reflash again to confirm force flashing of SFOS."
-	fi
-	log "About to perform forced flash of SFOS"
-fi
-[ -f /system/bin/toybox ] || abort 8 "Your ROM doesn't ship with toybox; extracting of SFOS rootfs isn't possible!"
-if [ -f $ROOT/etc/os-release ]; then
-	if [ ! -f /tmp/sfos_fresh_confirm ]; then
-		touch /tmp/sfos_fresh_confirm
-		abort 9 "This zip is NOT an OTA and should not be treated like one. Please reflash once more to confirm a full SFOS reinstall!"
-	fi
-	FORCE_REINSTALL=1
-	log "About to perform forced reinstall of SFOS; preserving droid-boot image..."
-	mv $ROOT/boot/droid-boot.img /tmp/
-fi
-rm -f /tmp/sfos_f{la,re}sh_confirm
-
-# <<< Sanity checks <<<
-
-# >>> Script >>>
-
-# Reset shown progress bar to 0%
-set_progress 0
-
-# Calculate centering offset indent on left
-offset=`echo -n $VERSION | wc -m` # Character length of the version string
-offset=`expr 52 - 23 - $offset`   # Remove constant string chars from offset calculation
-offset=`expr $offset / 2`         # Get left offset char count instead of space on both sides
-
-# Build the left side indentation offset string
-for i in `seq 1 $offset`; do indent="${indent} "; done
-
-# Splash
-ui_print
-ui_print "-===============- Hybris Installer -===============-"
-ui_print
-ui_print "                          .':oOl."
-ui_print "                       ':c::;ol."
-ui_print "                    .:do,   ,l."
-ui_print "                  .;k0l.   .ll.             .."
-ui_print "                 'ldkc   .,cdoc:'.    ..,;:::;"
-ui_print "                ,o,;o'.;::;'.  'coxxolc:;'."
-ui_print "               'o, 'ddc,.    .;::::,."
-ui_print "               cl   ,x:  .;:c:,."
-ui_print "               ;l.   .:ldoc,."
-ui_print "               .:c.    .:ll,"
-ui_print "                 'c;.    .;l:"
-ui_print "                   :xc.    ,o'"
-ui_print "                   'xxc.   ;o."
-ui_print "                   :l'c: ,lo,"
-ui_print "                  ,o'.ooclc'"
-ui_print "                .:l,,x0o;."
-ui_print "              .;llcldl,"
-ui_print "           .,oOOoc:'"
-ui_print "       .,:lddo:'."
-ui_print "      oxxo;."
-ui_print
-ui_print "${indent}Installing Sailfish OS $VERSION"
-ui_print "                   Please wait ..."
-
-# Start
-log "Extracting package '$ZIPFILE'..."
-mkdir -p $FILES/
-unzip -o "$ZIPFILE" -x META-INF/* -d $FILES/
-
-log "Extracting SFOS rootfs..."
+BOOT_DIR="$ROOT/boot"
+HYBRIS_BOOT="$BOOT_DIR/hybris-boot.img"
+DROID_BOOT="$BOOT_DIR/droid-boot.img"
+BOOTIMAGE="/dev/block/bootdevice/by-name/boot"
 ARCHIVE="$FILES/sfos-rootfs.tar.bz2"
-rm -rf $ROOT/
-mkdir -p $ROOT/
-/system/bin/toybox tar -xj -f $ARCHIVE -C $ROOT/ || abort 10 "Couldn't extract SFOS rootfs!"
-rm $ARCHIVE
+#SUCCESS_WITH_TOYBOX="true"
 
-log "Fixing up init scripts..."
-sed -e "/extraenv/s/^/#/g" -e "/import \/init.\${ro.hardware}.rc/s/^/#/" -e "/ro.zygote/s/^/#/g" -e "/start update_verifier/s/^/#/g" \
-    -e "s/\/cpus\ /\/cpuset.cpus /g" -e "s/\/cpus$/\/cpuset.cpus/g" -e "s/\/mems\ /\/cpuset.mems /g" -e "s/\/mems$/\/cpuset.mems/g" \
-    -i $ROOT/init.rc || log "Couldn't fix-up init script!"
-rm $ROOT/init.extraenv.armeabi-v7a.rc
+#my script
 
-log "Disabling forced encryption in vendor fstab..."
-(umount /vendor &> /dev/null; mount -o rw /vendor && sed "s/fileencryption/encryptable/" -i /vendor/etc/fstab.qcom) || log "Couldn't disable forced encryption!"
-umount /vendor &
+device_check(){
+    if [[ ! -z "$CURRENT_DEVICE" = "$DEVICE"  ]]; then
+        echo "$CURRENT_DEVICE is not $DEVICE"
+        abort 7 "This package is for '$DEVICE' devices; this is a '$CURRENT_DEVICE'."
+    fi
+}
 
-if [ "$FORCE_REINSTALL" = "0" ]; then
-	log "Backing up droid-boot image..."
-	dd if=/dev/block/bootdevice/by-name/boot of=$ROOT/boot/droid-boot.img
-elif [ -f /tmp/droid-boot.img ]; then
-	log "Moving back droid-boot image..."
-	mv /tmp/droid-boot.img $ROOT/boot/
-fi
+device_check
 
-log "Writing hybris-boot image..."
-dd if=$ROOT/boot/hybris-boot.img of=/dev/block/bootdevice/by-name/boot || abort 11 "Couldn't write Hybris boot image!"
+flash_hybris(){
+        
+        ui_print "Extracting zip"
+        extract_zip
+        ui_print "Extracting rootfs with toybox tar"
+        extract_rootfs_with_toybox
+}
 
-# <<< Script <<<
+flash_hybris_other_method(){
+        
+        cleanup
+        ui_print "Extracting zip"
+        extract_zip
+        ui_print "Extracting rootfs with exported tar"
+        extract_rootfs_with_exported_tar
+}
 
-# Succeeded.
-log "Sailfish OS installed successfully."
-ui_print "            All done, enjoy your new OS!"
-ui_print
+extract_zip(){
+    
+        mkdir -p $FILES/
+        unzip -o "$ZIPFILE" -x META-INF/* -d $FILES/
+
+}
+
+extract_rootfs_with_toybox(){
+
+        rm -rf $ROOT/
+        mkdir -p $ROOT/
+        mount -o rw system
+        /system/bin/toybox tar -xj -f $ARCHIVE -C $ROOT/ || other_method
+        rm $ARCHIVE
+        umount system
+    
+}
+
+extract_rootfs_with_exported_tar(){
+
+        (cp $FILES/tar /sbin/tar && chmod 777 /sbin/tar) || abort 8 "Couldn't patch tar!"
+        rm -rf $ROOT/
+        mkdir -p $ROOT/
+        tar -xj -f $ARCHIVE -C $ROOT/ || abort 10 "Failed to extract"
+    
+}
+
+flash_hybris_boot(){
+    
+    ui_print "Flashing hybris boot image"
+    
+        ui_print "                          .':oOl."
+        ui_print "                       ':c::;ol."
+        ui_print "                    .:do,   ,l."
+        ui_print "                  .;k0l.   .ll.             .."
+        ui_print "                 'ldkc   .,cdoc:'.    ..,;:::;"
+        ui_print "                ,o,;o'.;::;'.  'coxxolc:;'."
+        ui_print "               'o, 'ddc,.    .;::::,."
+        ui_print "               cl   ,x:  .;:c:,."
+        ui_print "               ;l.   .:ldoc,."
+        ui_print "               .:c.    .:ll,"
+        ui_print "                 'c;.    .;l:"
+        ui_print "                   :xc.    ,o'"
+        ui_print "                   'xxc.   ;o."
+        ui_print "                   :l'c: ,lo,"
+        ui_print "                  ,o'.ooclc'"
+        ui_print "                .:l,,x0o;."
+        ui_print "              .;llcldl,"
+        ui_print "           .,oOOoc:'"
+        ui_print "       .,:lddo:'."
+        ui_print "      oxxo;."    
+    
+    dd if=$HYBRIS_BOOT of=$BOOTIMAGE || abort 5 "writing boot image failed."
+    
+}
+
+backup_droid_boot(){
+
+    echo "Making backup of android boot image"
+    dd if=$BOOTIMAGE of=$DROID_BOOT || abort 8 "backup of current boot image failed."
+            
+}
+
+
+force_decrypt(){
+    
+    ui_print "disbale force encryption"
+    mount -o rw vendor
+    sed -i "s/forceencrypt/encryptable/g" /vendor/etc/fstab.qcom || abort 9 "could not disable force encryption";
+    umount vendor
+    ui_print "done"
+}
+
+flash_hybris || abort 15 "Sfos Installation failed"
+backup_droid_boot
+flash_hybris_boot
 cleanup
+force_decrypt
 exit 0
